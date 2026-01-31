@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+import random
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
@@ -27,10 +30,10 @@ def generate_launch_description():
     #        description='Spawn gazebo position as provided to spawn_entity.py'
     #    )
 
-    # @TODO: load PID gains? used in gazebo_ros_control fork
-    # @TODO: load tiago_pal_hardware_gazebo
-    
-    spawn_coordinates = [0.0, -1.3, 0.0]
+    # Randomize around the usual spawn area [0, -1.3, 0.]
+    spawn_x = str(random.uniform(-1.5, 1.5))
+    spawn_y = str(random.uniform(-2.5, -0.5))
+    spawn_yaw = str(random.uniform(-math.pi, math.pi))
 
     model_name = DeclareLaunchArgument(
         'model_name', default_value='tiago',
@@ -41,10 +44,11 @@ def generate_launch_description():
                         arguments=['-topic', 'robot_description',
                                    '-entity', LaunchConfiguration(
                                        'model_name'),
-                                   '-x', str(spawn_coordinates[0]),
-                                   '-y', str(spawn_coordinates[1]),
-                                   '-z', str(spawn_coordinates[2]),
-                                   '-timeout', '60.0',  # Increase timeout to 120 seconds
+                                   '-x', str(spawn_x),
+                                   '-y', str(spawn_y),
+                                   '-z', '0.0',
+                                   '-Y', str(spawn_yaw),
+                                   '-timeout', '60.0',
                                    # LaunchConfiguration('gzpose'),
                                    ],
                         output='screen')

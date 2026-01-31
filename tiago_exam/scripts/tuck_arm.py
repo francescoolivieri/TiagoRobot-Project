@@ -71,10 +71,26 @@ class ArmTucker(Node):
         executor_thread = Thread(target=executor.spin, daemon=True)
         executor_thread.start()
         
-        # Wait for MoveIt2 to be ready
-        self.create_rate(1.0).sleep()
+        self.get_logger().info('Arm tucker initialized, waiting for MoveIt2...')
+
+    def wait_for_moveit(self, timeout=30.0):
+        """Wait for MoveIt2 to be ready"""
+        start_time = time.time()
+        rate = self.create_rate(2.0)
         
-        self.get_logger().info('Arm tucker initialized and ready')
+        while time.time() - start_time < timeout:
+            try:
+                # Try to get current joint positions as a readiness check
+                if self.moveit2.joint_state is not None:
+                    self.get_logger().info('MoveIt2 is ready!')
+                    return True
+            except Exception as e:
+                self.get_logger().debug(f'Waiting for MoveIt2: {e}')
+            
+            rate.sleep()
+        
+        self.get_logger().error('Timeout waiting for MoveIt2')
+        return False
 
     def is_successful(self):
         return self._is_successful
@@ -97,6 +113,13 @@ def main(args=None):
 
     arm_tucker = ArmTucker()
 
+    # Wait for MoveIt2 to be ready
+    if not arm_tucker.wait_for_moveit(timeout=30.0):
+        arm_tucker.get_logger().error('MoveIt2 not ready, aborting')
+        arm_tucker.destroy_node()
+        rclpy.shutdown()
+        return
+
     for i in range(5):
         arm_tucker.get_logger().info(f'Tucking arm... Try {i + 1}')
         arm_tucker.tuck_arm()
@@ -113,7 +136,7 @@ def main(args=None):
 
     # Keep node alive for a moment
     time.sleep(1)
-    
+
     arm_tucker.destroy_node()
     rclpy.shutdown()
 
