@@ -31,8 +31,17 @@ def generate_launch_description():
     #    )
 
     # Randomize around the usual spawn area [0, -1.3, 0.]
-    spawn_x = str(random.uniform(-1.5, 1.5))
-    spawn_y = str(random.uniform(-2.5, -0.5))
+    
+    spawn_positions = [
+        (-2.1, -3.5),
+        (1, -4),
+        (0.67, -6.8),
+        (4.2, -5.9),
+        (3.1, -1.3)
+    ]
+    spawn_x, spawn_y = random.choice(spawn_positions)
+    spawn_x = str(spawn_x)
+    spawn_y = str(spawn_y)
     spawn_yaw = str(random.uniform(-math.pi, math.pi))
 
     model_name = DeclareLaunchArgument(
