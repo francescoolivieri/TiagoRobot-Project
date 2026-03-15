@@ -28,6 +28,10 @@ setup(
     entry_points={
         'console_scripts': [
             'localization = tiago_autonomous_navigation.localization:main',
+            'localization_server = tiago_autonomous_navigation.localization_server:main',
+            'navigation = tiago_autonomous_navigation.navigation:main',
+            'target_pose_server = tiago_autonomous_navigation.target_pose_server:main',
+            'task_2_coordinator = tiago_autonomous_navigation.task_2_coordinator:main',
         ],
     },
 )

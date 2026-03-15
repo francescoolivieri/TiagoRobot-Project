@@ -95,6 +95,35 @@ class ArmTucker(Node):
     def is_successful(self):
         return self._is_successful
 
+    def _is_configuration_reached(self, target_positions, tolerance=0.12, timeout=5.0):
+        """Verify that joints reached target within tolerance."""
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            joint_state = self.moveit2.joint_state
+            if joint_state is None:
+                time.sleep(0.1)
+                continue
+
+            joint_map = dict(zip(joint_state.name, joint_state.position))
+            max_error = 0.0
+
+            for joint_name, target in zip(JOINT_NAMES, target_positions):
+                current = joint_map.get(joint_name, None)
+                if current is None:
+                    max_error = float('inf')
+                    break
+                error = abs(current - target)
+                if error > max_error:
+                    max_error = error
+
+            if max_error <= tolerance:
+                return True
+
+            time.sleep(0.1)
+
+        return False
+
     def tuck_arm(self):
         """Move the arm to the home/tucked position"""
         try:
@@ -103,6 +132,15 @@ class ArmTucker(Node):
             self.moveit2.wait_until_executed()
             self._is_successful = True
             self.get_logger().info('Arm tucked successfully')
+            # self._is_successful = self._is_configuration_reached(
+            #     HOME_JOINT_POSITIONS,
+            #     tolerance=0.12,
+            #     timeout=5.0,
+            # )
+            # if self._is_successful:
+            #     self.get_logger().info('Arm tucked successfully')
+            # else:
+            #     self.get_logger().error('Arm motion finished but target configuration was not reached')
         except Exception as e:
             self._is_successful = False
             self.get_logger().error(f'Failed to tuck arm: {e}')

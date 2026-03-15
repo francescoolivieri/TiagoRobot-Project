@@ -1,0 +1,413 @@
+"""
+localization_server.py
+
+ROS 2 Action Server that wraps the active-localization logic from
+localization.py.  The server:
+
+  1. Seeds AMCL with a high-covariance initial-pose message.
+  2. Spins the robot a full rotation and checks the AMCL covariance.
+  3. If the covariance is still above the threshold, drives toward
+     the direction with the most free space and repeats.
+  4. Publishes covariance feedback every iteration.
+  5. Succeeds (result.success = True) once the covariance drops below
+     the threshold, or aborts/cancels on preemption / timeout.
+
+All tuning constants are preserved unchanged from localization.py.
+"""
+
+import time
+
+import numpy as np
+import rclpy
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.node import Node
+
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
+
+from tiago_task2_interfaces.action import Localize
+
+
+PI = 3.14
+ROTATION_VELOCITY = -0.6
+MIN_DIST_OBSTACLE = 0.8
+
+
+class LocalizationServer(Node):
+    """Action Server that actively localizes the robot."""
+
+    def __init__(self):
+        super().__init__('localization_server')
+
+        cb_group = ReentrantCallbackGroup()
+        
+        self.create_subscription(
+            PoseWithCovarianceStamped, 'amcl_pose',
+            self._amcl_callback, 10, callback_group=cb_group,
+        )
+        self.amcl_pose_publisher = self.create_publisher(
+            PoseWithCovarianceStamped, 'initialpose', 10
+        )
+        self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+
+        self.create_subscription(
+            Odometry, 'odom',
+            self._odom_callback, 10, callback_group=cb_group,
+        )
+        self.create_subscription(
+            LaserScan, 'scan_raw',
+            self._scan_callback, 10, callback_group=cb_group,
+        )
+
+        self.covariance_threshold = 0.03
+        cov = np.zeros(36, dtype=np.float64)
+        cov[0] = 50.0
+        cov[7] = 50.0
+        cov[35] = 10.0 # 2*PI
+        self._initial_covariance = cov
+
+        self.covariance_msg = PoseWithCovarianceStamped()
+        self.covariance_msg.pose.covariance = cov.tolist()
+
+        self.tb3_pose = [0.0, 0.0, 0.0]
+        self.tb3_orientation = [0.0, 0.0, 0.0, 1.0]
+        
+        # Variables for algorithm logic
+        self.amcl_position = None
+        self.amcl_orientation = None
+        self.amcl_received = False
+        self.odom_received = False
+        self.latest_scan = None
+        self.updated_scan = False
+        self.rotation = True  
+
+        # Action Server
+        self._action_server = ActionServer(
+            self,
+            Localize,
+            'localize',
+            execute_callback=self._execute_callback,
+            goal_callback=self._goal_callback,
+            cancel_callback=self._cancel_callback,
+            callback_group=cb_group,
+        )
+
+        # Publish the initial pose immediately at startup so that AMCL can
+        # start broadcasting the map→odom transform.  Without this, the map
+        # frame never appears and the Nav2 lifecycle manager (bt_navigator,
+        # planner_server …) can never finish activating, which in turn blocks
+        # the coordinator's waitUntilNav2Active() call forever.
+        # A 1.5 s delay lets the publisher finish DDS peer discovery before
+        # the first message is sent.
+        self._startup_timer = self.create_timer(
+            1.5, self._publish_initial_pose_once
+        )
+
+        self.get_logger().info('LocalizationServer ready.')
+
+
+    def _publish_initial_pose_once(self):
+        """
+        Fires once 1.5 s after startup.  Publishes a high-covariance seed
+        pose so AMCL immediately broadcasts the map→odom transform and the
+        Nav2 lifecycle chain can proceed to 'active'.
+        """
+        self._startup_timer.cancel()
+        self.get_logger().info(
+            'Seeding AMCL with initial pose (startup) to unblock Nav2 activation.'
+        )
+        self._publish_initial_pose()
+
+    
+    def _amcl_callback(self, msg):
+        self.amcl_position = msg.pose.pose.position
+        self.amcl_orientation = msg.pose.pose.orientation
+        self.covariance_msg.pose.covariance = msg.pose.covariance
+        self.amcl_received = True
+
+    def _odom_callback(self, msg):
+        x_o = msg.pose.pose.orientation.x
+        y_o = msg.pose.pose.orientation.y
+        z_o = msg.pose.pose.orientation.z
+        w_o = msg.pose.pose.orientation.w
+        
+        self.tb3_orientation = [x_o, y_o, z_o, w_o]
+        self.odom_received = True
+
+    def _scan_callback(self, msg: LaserScan):
+        self.latest_scan = msg
+        self.updated_scan = True
+
+    # Action Server stuff
+
+    def _goal_callback(self, goal_request):
+        self.get_logger().info('Localization goal received.')
+        return GoalResponse.ACCEPT
+
+    def _cancel_callback(self, goal_handle):
+        self.get_logger().info('Localization cancel requested.')
+        return CancelResponse.ACCEPT
+
+    # ── Main execute callback 
+
+    def _execute_callback(self, goal_handle):
+        """
+        Drives the full localization sequence.
+        """
+        feedback_msg = Localize.Feedback()
+        result = Localize.Result()
+
+        self._publish_initial_pose()
+
+        # wait for AMCL 
+        deadline = time.time() + 10.0
+        while not self.amcl_received and time.time() < deadline:
+            self.get_logger().warn('Waiting for AMCL pose...')
+            time.sleep(1.0)
+
+        if not self.amcl_received:
+            self.get_logger().error('AMCL pose not received. Aborting.')
+            goal_handle.abort()
+            result.success = False
+            return result
+
+        # wait for laser scan
+        deadline = time.time() + 10.0
+        while self.latest_scan is None and time.time() < deadline:
+            self.get_logger().warn('Waiting for laser scan...')
+            time.sleep(1.0)
+
+        # ---- localization loop ----
+        while rclpy.ok():
+
+            if goal_handle.is_cancel_requested:
+                self._stop()
+                goal_handle.canceled()
+                result.success = False
+                return result
+
+            self.get_logger().info('Localization in progress...')
+            self._rotate(2 * PI)
+
+            # Publish feedback with current max covariance
+            max_cov = float(np.max(self.covariance_msg.pose.covariance))
+            feedback_msg.current_covariance = max_cov
+            goal_handle.publish_feedback(feedback_msg)
+
+            if self._check_covariance():
+                break
+
+            time.sleep(1.0)
+
+            if goal_handle.is_cancel_requested:
+                self._stop()
+                goal_handle.canceled()
+                result.success = False
+                return result
+
+            # If not yet localized, find a direction to move towards
+            free_direction = self._find_free_direction(MIN_DIST_OBSTACLE + 0.2)
+            if free_direction:
+                angle, distance = free_direction
+                self._move_to_obstacle(angle, target_distance=MIN_DIST_OBSTACLE)
+
+                max_cov = float(np.max(self.covariance_msg.pose.covariance))
+                feedback_msg.current_covariance = max_cov
+                goal_handle.publish_feedback(feedback_msg)
+
+                if self._check_covariance():
+                    break
+
+        goal_handle.succeed()
+        result.success = True
+        self.get_logger().info('Localization complete!')
+        return result
+
+    # ── Logic ported from InitialPositionNode (unchanged math / thresholds) ──
+
+    def _publish_initial_pose(self):
+        
+        rclpy.spin_once(self, timeout_sec = 2.0)
+        
+        # max_wait = 10
+        # wait_count = 0
+        # while not self.odom_received and wait_count < max_wait:
+        #     self.get_logger().warn('Waiting for odometry data...')
+        #     rclpy.spin_once(self, timeout_sec=1)
+        #     wait_count += 1
+        
+        initial_pose_msg = PoseWithCovarianceStamped()
+        initial_pose_msg.pose.pose.position.x = float(self.tb3_pose[0])
+        initial_pose_msg.pose.pose.position.y = float(self.tb3_pose[1])
+        initial_pose_msg.pose.pose.position.z = float(self.tb3_pose[2])
+        initial_pose_msg.pose.pose.orientation.x = \
+            float(self.tb3_orientation[0])
+        initial_pose_msg.pose.pose.orientation.y = \
+            float(self.tb3_orientation[1])
+        initial_pose_msg.pose.pose.orientation.z = \
+            float(self.tb3_orientation[2])
+        initial_pose_msg.pose.pose.orientation.w = \
+            float(self.tb3_orientation[3])
+        initial_pose_msg.pose.covariance = self.covariance_values.tolist()
+        initial_pose_msg.header.frame_id = 'map'
+        initial_pose_msg.header.stamp = self.get_clock().now().to_msg()
+        self.amcl_pose_publisher.publish(initial_pose_msg)
+        
+
+    def _check_covariance(self) -> bool:
+        """Mirrors InitialPositionNode.check_covariance() exactly."""
+        covariance_values = self.covariance_msg.pose.covariance
+        max_cov = np.max(covariance_values)
+
+        cov_x   = covariance_values[0]   # x position covariance
+        cov_y   = covariance_values[7]   # y position covariance
+        cov_yaw = covariance_values[35]  # yaw covariance
+
+        self.get_logger().info(
+            f'Covariance - X: {cov_x:.4f}, Y: {cov_y:.4f}, '
+            f'Yaw: {cov_yaw:.4f}, Max: {max_cov:.4f}'
+        )
+
+        if max_cov < self.covariance_threshold:
+            self.get_logger().info('Covariance below the threshold.')
+            self.get_logger().info('Robot is localized.')
+            if self.amcl_position is not None:
+                self.get_logger().info(
+                    f'Final AMCL position: '
+                    f'x={self.amcl_position.x:.2f}, y={self.amcl_position.y:.2f}'
+                )
+            return True
+        else:
+            self.get_logger().warn('Covariance above the threshold.')
+            return False
+
+    def _find_free_direction(self, min_dist: float):
+        ''' Find the direction with the most free space '''
+        if self.latest_scan is None:
+            self.get_logger().warn('No scan data available.')
+            return None
+
+        ranges = self.latest_scan.ranges
+        num_ranges = len(ranges)
+        
+        # Divide scan into 8 sectors and find which has most space
+        sector_size = num_ranges // 8
+        best_sector = -1
+        max_avg_distance = 0.0
+
+        for i in range(8):
+            start_idx = i * sector_size
+            end_idx = start_idx + sector_size
+            sector_ranges = ranges[start_idx:end_idx]
+            
+            ## Filter out invalid readings
+            valid_ranges = [r for r in sector_ranges if self.latest_scan.range_min < r < self.latest_scan.range_max]
+            
+            if valid_ranges:
+                avg_distance = sum(valid_ranges) / len(valid_ranges)
+                if avg_distance > max_avg_distance and min(valid_ranges) > min_dist:
+                    max_avg_distance = avg_distance
+                    best_sector = i
+
+        # add additional rotation if everything is occupied
+        if best_sector == -1:
+            self.get_logger().info(
+                'Could NOT find feasible direction. Rotating a bit more...'
+            )
+            self._rotate(PI / 3)
+            time.sleep(0.5)
+            return self._find_free_direction(min_dist)
+
+        # Convert sector to angle (0 = front, counter-clockwise)
+        angle = self.latest_scan.angle_min + (best_sector * sector_size + sector_size/2) * self.latest_scan.angle_increment
+        
+        self.get_logger().info(
+            f'Found free direction at angle {angle:.2f} rad '
+            f'with avg distance {max_avg_distance:.2f}m'
+        )
+        return angle, max_avg_distance
+
+    def _move_to_obstacle(self, target_angle: float, target_distance: float = 1.0):
+        """Move in the specified direction until target_distance from obstacle"""
+        LINEAR_SPEED = 0.25
+
+        self.get_logger().info(f'Rotating to target angle {target_angle:.2f} rad')
+        self._rotate(target_angle)
+        time.sleep(0.5)
+
+        self.get_logger().info('Moving toward obstacle...')
+        vel_msg = Twist()
+        vel_msg.linear.x = LINEAR_SPEED
+
+        while True:
+            if self.latest_scan is None or not self.updated_scan:
+                time.sleep(0.01)
+                continue
+
+            # Check front distance (centered region)
+            ranges = self.latest_scan.ranges
+            num_ranges = len(ranges)
+            print(f"angle_min: {self.latest_scan.angle_min}, angle_max: {self.latest_scan.angle_max}, angle_increment: {self.latest_scan.angle_increment} ")
+            center_index = int((-self.latest_scan.angle_min)/self.latest_scan.angle_increment)
+            front_indices = list(range(center_index - 45, center_index)) + list(range(center_index, center_index + 45))
+            front_ranges = [ranges[i] for i in front_indices if self.latest_scan.range_min < ranges[i] < self.latest_scan.range_max] 
+            
+            if front_ranges:
+                min_front_distance = min(front_ranges)
+                self.get_logger().info(
+                    f'Distance to obstacle: {min_front_distance:.2f}m'
+                )
+                if min_front_distance <= target_distance:
+                    self.get_logger().info(
+                        f'Reached target distance: {min_front_distance:.2f}m'
+                    )
+                    break
+
+            self.cmd_vel_pub.publish(vel_msg)
+            self.updated_scan = False
+
+        self._stop()
+        self.get_logger().info('Movement complete!')
+
+    def _rotate(self, angle: float):
+        """Rotate the robot to the specified angle"""
+        start_time = self.get_clock().now()
+
+        if self.rotation:
+            vel_msg = Twist()
+            vel_msg.angular.z = ROTATION_VELOCITY
+            vel_msg.linear.y = -0.3
+            duration = -angle / vel_msg.angular.z
+
+            while (self.get_clock().now() - start_time).nanoseconds / 1e9 < duration:
+                self.cmd_vel_pub.publish(vel_msg)
+                time.sleep(0.01)
+
+        self._stop()
+
+    def _stop(self):
+        """Mirrors InitialPositionNode.stop()."""
+        vel_msg = Twist()
+        vel_msg.angular.z = 0.0
+        vel_msg.linear.x = 0.0
+        self.cmd_vel_pub.publish(vel_msg)
+        self.get_logger().info('Publishing: "%s"' % vel_msg)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = LocalizationServer()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    try:
+        executor.spin()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

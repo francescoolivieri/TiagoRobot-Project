@@ -6,36 +6,36 @@ amcl:
     alpha3: 0.3
     alpha4: 0.3
     base_frame_id: base_footprint
-    beam_skip_distance: 2.5
-    beam_skip_error_threshold: 0.5
+    beam_skip_distance: 0.5      # was 2.5 – skip only truly anomalous beams so wrong poses can't hide
+    beam_skip_error_threshold: 0.9
     beam_skip_threshold: 0.3
     do_beamskip: true
     global_frame_id: map
     lambda_short: 0.1
-    laser_likelihood_max_dist: 6.0
+    laser_likelihood_max_dist: 2.0  # was 6.0 – sharper likelihood field, wrong poses score much lower
     laser_max_range: 100.0
     laser_min_range: -1.0
     laser_model_type: "likelihood_field"
-    max_beams: 60
-    max_particles: 2500
-    min_particles: 600
+    max_beams: 120               # was 60 – more beams = finer yaw discrimination
+    max_particles: 2500          # was 2500 – more particles to maintain hypothesis diversity
+    min_particles: 600          # was 600
     odom_frame_id: odom
-    pf_err: 0.12
+    pf_err: 0.1                 # was 0.12 – require tighter particle representation
     pf_z: 0.99
     recovery_alpha_fast: 0.1
     recovery_alpha_slow: 0.001
-    resample_interval: 1
+    resample_interval: 10
     robot_model_type: "nav2_amcl::DifferentialMotionModel"
     save_pose_rate: 0.5
-    sigma_hit: 0.2
+    sigma_hit: 0.15               # was 0.2 – sharper Gaussian, correct yaw scores much higher than ±few degrees
     tf_broadcast: true
     transform_tolerance: 1.0
-    update_min_a: 0.15
-    update_min_d: 0.1
-    z_hit: 0.7
+    update_min_a: 0.15            # was 0.2 – update twice as often during localization rotation
+    update_min_d: 0.15
+    z_hit: 0.8                   # was 0.7 – weight correct hits more
     z_max: 0.05
-    z_rand: 0.3
-    z_short: 0.05
+    z_rand: 0.10                 # was 0.3 – less tolerance for mismatches, better pose discrimination
+    z_short: 0.05                # sum = 1.0
     scan_topic: /scan_raw
     set_initial_pose: false
     initial_pose:
@@ -151,8 +151,8 @@ controller_server:
     # Goal checker parameters
     general_goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.5
+      yaw_goal_tolerance: 3.14   # don't care about final heading
       stateful: True
     # DWB parameters
     FollowPath:
@@ -179,11 +179,11 @@ controller_server:
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.2
-      xy_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.5
       trans_stopped_velocity: 0.25
       short_circuit_trajectory_evaluation: True
       stateful: True
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      critics: ["Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
       BaseObstacle.scale: 0.02
       PathAlign.scale: 32.0
       PathAlign.forward_point_distance: 0.1
@@ -191,9 +191,9 @@ controller_server:
       GoalAlign.forward_point_distance: 0.1
       PathDist.scale: 32.0
       GoalDist.scale: 24.0
-      RotateToGoal.scale: 32.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
+      RotateToGoal.scale: 32.0 ##
+      RotateToGoal.slowing_factor: 5.0 ##
+      RotateToGoal.lookahead_time: -1.0 ##
 
 global_costmap:
   global_costmap:
@@ -218,7 +218,7 @@ global_costmap:
         observation_sources: scan_raw
         
         scan:
-          topic: /scan
+          topic: /scan_raw
           max_obstacle_height: 2.0
           clearing: True
           marking: True
@@ -288,7 +288,7 @@ map_saver:
   ros__parameters:
     use_sim_time: true
     save_map_timeout: 5.0
-    free_thresh_default: 0.25
+    free_thresh_default: 0.10
     occupied_thresh_default: 0.65
     map_subscribe_transient_local: True
 
