@@ -33,12 +33,12 @@ def generate_launch_description():
     # Randomize around the usual spawn area [0, -1.3, 0.]
     
     spawn_positions = [
-        (-2.1, -3.5),
-        (1, -4),
-        (0.67, -6.8),
-        (4.2, -5.9),
-        (3.1, -1.3),
-        #(0,-1.2)
+        # (-2.1, -3.5),
+        # (1, -4),
+        # (0.67, -6.8),
+        # (4.2, -5.9),
+        # (3.1, -1.3),
+        (0,-1.2)
     ]
     spawn_x, spawn_y = random.choice(spawn_positions)
     spawn_x = str(spawn_x)

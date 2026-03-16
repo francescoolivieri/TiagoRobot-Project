@@ -66,7 +66,7 @@ class LocalizationServer(Node):
         cov = np.zeros(36, dtype=np.float64)
         cov[0] = 50.0
         cov[7] = 50.0
-        cov[35] = 10.0 # 2*PI
+        cov[35] = 0.0 #10.0 # 2*PI
         self._initial_covariance = cov
 
         self.covariance_msg = PoseWithCovarianceStamped()
@@ -111,9 +111,7 @@ class LocalizationServer(Node):
 
     def _publish_initial_pose_once(self):
         """
-        Fires once 1.5 s after startup.  Publishes a high-covariance seed
-        pose so AMCL immediately broadcasts the map→odom transform and the
-        Nav2 lifecycle chain can proceed to 'active'.
+        To activate the nav2 lifecycle
         """
         self._startup_timer.cancel()
         self.get_logger().info(
@@ -229,29 +227,22 @@ class LocalizationServer(Node):
     # ── Logic ported from InitialPositionNode (unchanged math / thresholds) ──
 
     def _publish_initial_pose(self):
+        time.sleep(5.0) # wait for the nodes to be ready
         
-        rclpy.spin_once(self, timeout_sec = 2.0)
-        
-        # max_wait = 10
-        # wait_count = 0
-        # while not self.odom_received and wait_count < max_wait:
-        #     self.get_logger().warn('Waiting for odometry data...')
-        #     rclpy.spin_once(self, timeout_sec=1)
-        #     wait_count += 1
-        
+        # quat_sum = sum(abs(v) for v in self.tb3_orientation)
+        # if quat_sum < 0.01:
+        #     self.get_logger().error('Invalid quaternion (near zero). Defaulting to (0,0,0,1).')
+        #     self.tb3_orientation = [0.0, 0.0, 0.0, 1.0]
+
         initial_pose_msg = PoseWithCovarianceStamped()
         initial_pose_msg.pose.pose.position.x = float(self.tb3_pose[0])
         initial_pose_msg.pose.pose.position.y = float(self.tb3_pose[1])
         initial_pose_msg.pose.pose.position.z = float(self.tb3_pose[2])
-        initial_pose_msg.pose.pose.orientation.x = \
-            float(self.tb3_orientation[0])
-        initial_pose_msg.pose.pose.orientation.y = \
-            float(self.tb3_orientation[1])
-        initial_pose_msg.pose.pose.orientation.z = \
-            float(self.tb3_orientation[2])
-        initial_pose_msg.pose.pose.orientation.w = \
-            float(self.tb3_orientation[3])
-        initial_pose_msg.pose.covariance = self.covariance_values.tolist()
+        initial_pose_msg.pose.pose.orientation.x = float(self.tb3_orientation[0])
+        initial_pose_msg.pose.pose.orientation.y = float(self.tb3_orientation[1])
+        initial_pose_msg.pose.pose.orientation.z = float(self.tb3_orientation[2])
+        initial_pose_msg.pose.pose.orientation.w = float(self.tb3_orientation[3])
+        initial_pose_msg.pose.covariance = self._initial_covariance.tolist()
         initial_pose_msg.header.frame_id = 'map'
         initial_pose_msg.header.stamp = self.get_clock().now().to_msg()
         self.amcl_pose_publisher.publish(initial_pose_msg)
