@@ -58,15 +58,6 @@ def generate_launch_description():
         }.items(),
     )
 
-    # Tuck arm 
-    tuck_arm = Node(
-        package='tiago_exam',
-        executable='tuck_arm.py',
-        emulate_tty=True,
-        output='screen',
-        parameters=[{'use_sim_time': True}],
-    )
-    
     # Localization 
     localization_node = Node(
         package='tiago_autonomous_navigation',
@@ -155,8 +146,6 @@ def generate_launch_description():
     ld.add_action(tiago_world_cmd)
 
     ld.add_action(TimerAction(period=2.5,  actions=[navigation_cmd]))
-
-    ld.add_action(TimerAction(period=6.5,  actions=[tuck_arm]))
 
     ld.add_action(TimerAction(period=13.0, actions=[
         localization_node,

@@ -66,10 +66,13 @@ class ArmTucker(Node):
         self.moveit2.max_acceleration = 0.5
         
         # Start executor in background
-        executor = rclpy.executors.MultiThreadedExecutor(2)
-        executor.add_node(self)
-        executor_thread = Thread(target=executor.spin, daemon=True)
-        executor_thread.start()
+        self._tuck_executor = rclpy.executors.MultiThreadedExecutor(2)
+        self._tuck_executor.add_node(self)
+        self._executor_thread = Thread(
+            target=self._tuck_executor.spin,
+            daemon=True,
+        )
+        self._executor_thread.start()
         
         self.get_logger().info('Arm tucker initialized, waiting for MoveIt2...')
 
@@ -94,6 +97,11 @@ class ArmTucker(Node):
 
     def is_successful(self):
         return self._is_successful
+
+    def close(self):
+        self._tuck_executor.shutdown()
+        self._executor_thread.join(timeout=2.0)
+        self.destroy_node()
 
     def _is_configuration_reached(self, target_positions, tolerance=0.12, timeout=5.0):
         """Verify that joints reached target within tolerance."""
@@ -130,17 +138,17 @@ class ArmTucker(Node):
             self.get_logger().info('Moving arm to tucked position...')
             self.moveit2.move_to_configuration(HOME_JOINT_POSITIONS)
             self.moveit2.wait_until_executed()
-            self._is_successful = True
-            self.get_logger().info('Arm tucked successfully')
-            # self._is_successful = self._is_configuration_reached(
-            #     HOME_JOINT_POSITIONS,
-            #     tolerance=0.12,
-            #     timeout=5.0,
-            # )
-            # if self._is_successful:
-            #     self.get_logger().info('Arm tucked successfully')
-            # else:
-            #     self.get_logger().error('Arm motion finished but target configuration was not reached')
+            self._is_successful = self._is_configuration_reached(
+                HOME_JOINT_POSITIONS,
+                tolerance=0.12,
+                timeout=5.0,
+            )
+            if self._is_successful:
+                self.get_logger().info('Arm tucked successfully')
+            else:
+                self.get_logger().error(
+                    'Arm motion finished but target configuration was not reached'
+                )
         except Exception as e:
             self._is_successful = False
             self.get_logger().error(f'Failed to tuck arm: {e}')
@@ -154,7 +162,7 @@ def main(args=None):
     # Wait for MoveIt2 to be ready
     if not arm_tucker.wait_for_moveit(timeout=30.0):
         arm_tucker.get_logger().error('MoveIt2 not ready, aborting')
-        arm_tucker.destroy_node()
+        arm_tucker.close()
         rclpy.shutdown()
         return
 
@@ -175,7 +183,7 @@ def main(args=None):
     # Keep node alive for a moment
     time.sleep(1)
 
-    arm_tucker.destroy_node()
+    arm_tucker.close()
     rclpy.shutdown()
 
 

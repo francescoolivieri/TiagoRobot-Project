@@ -4,7 +4,7 @@ localization_server.py
 ROS 2 Action Server that wraps the active-localization logic from
 localization.py.  The server:
 
-  1. Seeds AMCL with a high-covariance initial-pose message.
+  1. Requests AMCL global localization, with a high-covariance initial pose.
   2. Spins the robot a full rotation and checks the AMCL covariance.
   3. If the covariance is still above the threshold, drives toward
      the direction with the most free space and repeats.
@@ -12,9 +12,10 @@ localization.py.  The server:
   5. Succeeds (result.success = True) once the covariance drops below
      the threshold, or aborts/cancels on preemption / timeout.
 
-All tuning constants are preserved unchanged from localization.py.
+The active-localization constants are kept close to localization.py.
 """
 
+import math
 import time
 
 import numpy as np
@@ -27,13 +28,15 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
+from std_srvs.srv import Empty
 
 from tiago_task2_interfaces.action import Localize
 
 
 PI = 3.14
 ROTATION_VELOCITY = -0.6
-MIN_DIST_OBSTACLE = 0.8
+MIN_DIST_OBSTACLE = 1.0
+FRONT_CHECK_SAMPLES = 45
 
 
 class LocalizationServer(Node):
@@ -54,7 +57,7 @@ class LocalizationServer(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
         self.create_subscription(
-            Odometry, 'odom',
+            Odometry, '/mobile_base_controller/odom',
             self._odom_callback, 10, callback_group=cb_group,
         )
         self.create_subscription(
@@ -66,7 +69,7 @@ class LocalizationServer(Node):
         cov = np.zeros(36, dtype=np.float64)
         cov[0] = 50.0
         cov[7] = 50.0
-        cov[35] = 0.0 #10.0 # 2*PI
+        cov[35] = math.pi ** 2
         self._initial_covariance = cov
 
         self.covariance_msg = PoseWithCovarianceStamped()
@@ -79,10 +82,17 @@ class LocalizationServer(Node):
         self.amcl_position = None
         self.amcl_orientation = None
         self.amcl_received = False
+        self.amcl_update_count = 0
         self.odom_received = False
         self.latest_scan = None
         self.updated_scan = False
         self.rotation = True  
+
+        self.global_localization_client = self.create_client(
+            Empty,
+            'reinitialize_global_localization',
+            callback_group=cb_group,
+        )
 
         # Action Server
         self._action_server = ActionServer(
@@ -95,25 +105,20 @@ class LocalizationServer(Node):
             callback_group=cb_group,
         )
 
-        # Publish the initial pose immediately at startup so that AMCL can
-        # start broadcasting the map→odom transform.  Without this, the map
-        # frame never appears and the Nav2 lifecycle manager (bt_navigator,
-        # planner_server …) can never finish activating, which in turn blocks
-        # the coordinator's waitUntilNav2Active() call forever.
-        # A 1.5 s delay lets the publisher finish DDS peer discovery before
-        # the first message is sent.
+        # Seed AMCL until it answers so Nav2 can activate the map frame.
         self._startup_timer = self.create_timer(
-            1.5, self._publish_initial_pose_once
+            1.5, self._publish_initial_pose_until_amcl
         )
 
         self.get_logger().info('LocalizationServer ready.')
 
 
-    def _publish_initial_pose_once(self):
-        """
-        To activate the nav2 lifecycle
-        """
-        self._startup_timer.cancel()
+    def _publish_initial_pose_until_amcl(self):
+        """Seed AMCL at startup, retrying if DDS missed an earlier message."""
+        if self.amcl_received:
+            self._startup_timer.cancel()
+            return
+
         self.get_logger().info(
             'Seeding AMCL with initial pose (startup) to unblock Nav2 activation.'
         )
@@ -125,6 +130,7 @@ class LocalizationServer(Node):
         self.amcl_orientation = msg.pose.pose.orientation
         self.covariance_msg.pose.covariance = msg.pose.covariance
         self.amcl_received = True
+        self.amcl_update_count += 1
 
     def _odom_callback(self, msg):
         x_o = msg.pose.pose.orientation.x
@@ -158,16 +164,8 @@ class LocalizationServer(Node):
         feedback_msg = Localize.Feedback()
         result = Localize.Result()
 
-        self._publish_initial_pose()
-
-        # wait for AMCL 
-        deadline = time.time() + 10.0
-        while not self.amcl_received and time.time() < deadline:
-            self.get_logger().warn('Waiting for AMCL pose...')
-            time.sleep(1.0)
-
-        if not self.amcl_received:
-            self.get_logger().error('AMCL pose not received. Aborting.')
+        if not self._initialize_amcl():
+            self.get_logger().error('AMCL pose not received after initialization. Aborting.')
             goal_handle.abort()
             result.success = False
             return result
@@ -224,16 +222,47 @@ class LocalizationServer(Node):
         self.get_logger().info('Localization complete!')
         return result
 
-    # ── Logic ported from InitialPositionNode (unchanged math / thresholds) ──
+    # ── Localization helpers ───────────────────────────────────────────────
+
+    def _initialize_amcl(self) -> bool:
+        """Reset AMCL globally and wait for a pose produced after the reset."""
+        if self.global_localization_client.wait_for_service(timeout_sec=10.0):
+            future = self.global_localization_client.call_async(Empty.Request())
+            deadline = time.time() + 10.0
+
+            while not future.done() and time.time() < deadline:
+                time.sleep(0.05)
+
+            if future.done() and future.exception() is None:
+                self.get_logger().info('AMCL global localization requested.')
+                updates_after_reset = self.amcl_update_count
+                return self._wait_for_amcl_update(updates_after_reset)
+
+            self.get_logger().warn(
+                'AMCL global localization service failed. Using initialpose instead.'
+            )
+        else:
+            self.get_logger().warn(
+                'AMCL global localization service is unavailable...'
+            )
+            rclpy.shutdown()
+
+        self.covariance_msg.pose.covariance = self._initial_covariance.tolist()
+        self.amcl_received = False
+        self._publish_initial_pose()
+        updates_after_initial_pose = self.amcl_update_count
+        return self._wait_for_amcl_update(updates_after_initial_pose)
+
+    def _wait_for_amcl_update(self, updates_before: int) -> bool:
+        """Wait for AMCL to publish a pose newer than the initialization."""
+        deadline = time.time() + 10.0
+        while self.amcl_update_count <= updates_before and time.time() < deadline:
+            self.get_logger().warn('Waiting for AMCL pose...')
+            time.sleep(1.0)
+
+        return self.amcl_update_count > updates_before
 
     def _publish_initial_pose(self):
-        time.sleep(5.0) # wait for the nodes to be ready
-        
-        # quat_sum = sum(abs(v) for v in self.tb3_orientation)
-        # if quat_sum < 0.01:
-        #     self.get_logger().error('Invalid quaternion (near zero). Defaulting to (0,0,0,1).')
-        #     self.tb3_orientation = [0.0, 0.0, 0.0, 1.0]
-
         initial_pose_msg = PoseWithCovarianceStamped()
         initial_pose_msg.pose.pose.position.x = float(self.tb3_pose[0])
         initial_pose_msg.pose.pose.position.y = float(self.tb3_pose[1])
@@ -303,14 +332,12 @@ class LocalizationServer(Node):
                     max_avg_distance = avg_distance
                     best_sector = i
 
-        # add additional rotation if everything is occupied
+        # Let the next localization pass try again instead of recursing forever.
         if best_sector == -1:
-            self.get_logger().info(
-                'Could NOT find feasible direction. Rotating a bit more...'
+            self.get_logger().warn(
+                'Could not find a safe direction to move toward.'
             )
-            self._rotate(PI / 3)
-            time.sleep(0.5)
-            return self._find_free_direction(min_dist)
+            return None
 
         # Convert sector to angle (0 = front, counter-clockwise)
         angle = self.latest_scan.angle_min + (best_sector * sector_size + sector_size/2) * self.latest_scan.angle_increment
@@ -332,19 +359,29 @@ class LocalizationServer(Node):
         self.get_logger().info('Moving toward obstacle...')
         vel_msg = Twist()
         vel_msg.linear.x = LINEAR_SPEED
+        self.updated_scan = False
+        deadline = time.time() + 20.0
 
-        while True:
+        while rclpy.ok() and time.time() < deadline:
             if self.latest_scan is None or not self.updated_scan:
                 time.sleep(0.01)
                 continue
 
             # Check front distance (centered region)
             ranges = self.latest_scan.ranges
-            num_ranges = len(ranges)
-            print(f"angle_min: {self.latest_scan.angle_min}, angle_max: {self.latest_scan.angle_max}, angle_increment: {self.latest_scan.angle_increment} ")
-            center_index = int((-self.latest_scan.angle_min)/self.latest_scan.angle_increment)
-            front_indices = list(range(center_index - 45, center_index)) + list(range(center_index, center_index + 45))
-            front_ranges = [ranges[i] for i in front_indices if self.latest_scan.range_min < ranges[i] < self.latest_scan.range_max] 
+            if self.latest_scan.angle_increment == 0.0:
+                self.get_logger().warn('Laser scan has no angular resolution.')
+                break
+
+            center_index = int(
+                -self.latest_scan.angle_min / self.latest_scan.angle_increment
+            )
+            first_index = max(0, center_index - FRONT_CHECK_SAMPLES)
+            last_index = min(len(ranges), center_index + FRONT_CHECK_SAMPLES + 1)
+            front_ranges = [
+                distance for distance in ranges[first_index:last_index]
+                if self.latest_scan.range_min < distance < self.latest_scan.range_max
+            ]
             
             if front_ranges:
                 min_front_distance = min(front_ranges)
@@ -360,6 +397,9 @@ class LocalizationServer(Node):
             self.cmd_vel_pub.publish(vel_msg)
             self.updated_scan = False
 
+        if time.time() >= deadline:
+            self.get_logger().warn('Movement timed out before reaching the target distance.')
+
         self._stop()
         self.get_logger().info('Movement complete!')
 
@@ -367,11 +407,11 @@ class LocalizationServer(Node):
         """Rotate the robot to the specified angle"""
         start_time = self.get_clock().now()
 
-        if self.rotation:
+        if self.rotation and abs(angle) > 0.0:
             vel_msg = Twist()
-            vel_msg.angular.z = ROTATION_VELOCITY
-            vel_msg.linear.y = -0.3
-            duration = -angle / vel_msg.angular.z
+            speed = abs(ROTATION_VELOCITY)
+            vel_msg.angular.z = math.copysign(speed, angle)
+            duration = abs(angle) / speed
 
             while (self.get_clock().now() - start_time).nanoseconds / 1e9 < duration:
                 self.cmd_vel_pub.publish(vel_msg)
