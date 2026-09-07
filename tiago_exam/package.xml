@@ -16,12 +16,20 @@
   <exec_depend>gazebo_plugins</exec_depend>
   <exec_depend>gazebo_ros</exec_depend>
   <exec_depend>gazebo_ros2_control</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>diff_drive_controller</exec_depend>
+  <exec_depend>force_torque_sensor_broadcaster</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>joint_trajectory_controller</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_pal</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>pal_gazebo_worlds</exec_depend>
   <exec_depend>pal_gazebo_plugins</exec_depend>
+  <exec_depend>ros2_linkattacher</exec_depend>
+  <exec_depend>pal_gripper_controller_configuration</exec_depend>
   <exec_depend>tiago_bringup</exec_depend>
+  <exec_depend>tiago_controller_configuration</exec_depend>
   <exec_depend>tiago_description</exec_depend>
   <exec_depend>tiago_moveit_config</exec_depend>
   <exec_depend>tiago_2dnav</exec_depend>

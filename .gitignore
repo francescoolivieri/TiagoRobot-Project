@@ -3,4 +3,8 @@
 !/tiago_autonomous_navigation/
 !/pal_navigation_cfg_public/
 !/tiago_exam/
+!/presentation_task2/
+!/tiago_pick_place/
+/tiago_pick_place/**/__pycache__/
+/tiago_pick_place/**/*.py[co]
 !.gitignore

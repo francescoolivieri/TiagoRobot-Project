@@ -23,6 +23,7 @@ CAMERA_FRAME       = 'head_front_camera_rgb_optical_frame'
 def generate_launch_description():
 
     use_sim_time = LaunchConfiguration('use_sim_time', default='True')
+    map_path = '/home/francesco/tiago_ws/src/my_map'
 
     # Simulation world 
     tiago_world_cmd = IncludeLaunchDescription(
@@ -50,7 +51,7 @@ def generate_launch_description():
             )
         ),
         launch_arguments={
-            'map_path':      'src/my_map',
+            'map_path':      map_path,
             'use_sim_time':  use_sim_time,
             'is_public_sim': 'false',
             'rviz':          'True',
@@ -145,9 +146,9 @@ def generate_launch_description():
     
     ld.add_action(tiago_world_cmd)
 
-    ld.add_action(TimerAction(period=2.5,  actions=[navigation_cmd]))
+    ld.add_action(TimerAction(period=5.0, actions=[navigation_cmd]))
 
-    ld.add_action(TimerAction(period=13.0, actions=[
+    ld.add_action(TimerAction(period=15.0, actions=[
         localization_node,
         target_pose_server_node,
         aruco_pick,
@@ -155,6 +156,6 @@ def generate_launch_description():
     ]))
 
     
-    ld.add_action(TimerAction(period=20.0, actions=[task2_coordinator]))
+    ld.add_action(TimerAction(period=22.0, actions=[task2_coordinator]))
 
     return ld

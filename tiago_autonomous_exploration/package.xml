@@ -7,12 +7,33 @@
   <maintainer email="manuel.fiorucci@studio.unibo.it">manuel</maintainer>
   <license>Apache License 2.0</license>
 
+  <buildtool_depend>ament_cmake_auto</buildtool_depend>
+
+  <exec_depend>gazebo_plugins</exec_depend>
+  <exec_depend>gazebo_ros</exec_depend>
+  <exec_depend>gazebo_ros2_control</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_pal</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>pal_gazebo_worlds</exec_depend>
+  <exec_depend>pal_gazebo_plugins</exec_depend>
+  <exec_depend>tiago_bringup</exec_depend>
+  <exec_depend>tiago_description</exec_depend>
+  <exec_depend>tiago_moveit_config</exec_depend>
+  <exec_depend>tiago_2dnav</exec_depend>
+
   <exec_depend>ros2launch</exec_depend>
   
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>launch_testing_ament_cmake</test_depend>
+  <test_depend>rclcpp</test_depend>
+  <test_depend>sensor_msgs</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

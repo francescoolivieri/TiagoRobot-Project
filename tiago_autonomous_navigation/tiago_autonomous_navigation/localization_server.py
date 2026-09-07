@@ -37,6 +37,7 @@ PI = 3.14
 ROTATION_VELOCITY = -0.6
 MIN_DIST_OBSTACLE = 1.0
 FRONT_CHECK_SAMPLES = 45
+LOCALIZATION_TIMEOUT_SECONDS = 120.0
 
 
 class LocalizationServer(Node):
@@ -65,7 +66,7 @@ class LocalizationServer(Node):
             self._scan_callback, 10, callback_group=cb_group,
         )
 
-        self.covariance_threshold = 0.03
+        self.covariance_threshold = 0.035
         cov = np.zeros(36, dtype=np.float64)
         cov[0] = 50.0
         cov[7] = 50.0
@@ -177,6 +178,8 @@ class LocalizationServer(Node):
             time.sleep(1.0)
 
         # ---- localization loop ----
+        localization_start = time.monotonic()
+
         while rclpy.ok():
 
             if goal_handle.is_cancel_requested:
@@ -184,6 +187,23 @@ class LocalizationServer(Node):
                 goal_handle.canceled()
                 result.success = False
                 return result
+
+            if time.monotonic() - localization_start >= LOCALIZATION_TIMEOUT_SECONDS:
+                self.get_logger().warn(
+                    'Localization timed out after 2 minutes. Reinitializing AMCL...'
+                )
+                self._stop()
+
+                if not self._initialize_amcl():
+                    self.get_logger().error(
+                        'AMCL reinitialization failed. Aborting localization.'
+                    )
+                    goal_handle.abort()
+                    result.success = False
+                    return result
+
+                localization_start = time.monotonic()
+                continue
 
             self.get_logger().info('Localization in progress...')
             self._rotate(2 * PI)
@@ -222,10 +242,10 @@ class LocalizationServer(Node):
         self.get_logger().info('Localization complete!')
         return result
 
-    # ── Localization helpers ───────────────────────────────────────────────
+    # ── Localization helpers 
 
     def _initialize_amcl(self) -> bool:
-        """Reset AMCL globally and wait for a pose produced after the reset."""
+        # Reset AMCL globally and wait for a pose produced after the reset.
         if self.global_localization_client.wait_for_service(timeout_sec=10.0):
             future = self.global_localization_client.call_async(Empty.Request())
             deadline = time.time() + 10.0
@@ -254,7 +274,7 @@ class LocalizationServer(Node):
         return self._wait_for_amcl_update(updates_after_initial_pose)
 
     def _wait_for_amcl_update(self, updates_before: int) -> bool:
-        """Wait for AMCL to publish a pose newer than the initialization."""
+        # Wait for AMCL to publish a pose newer than the initialization
         deadline = time.time() + 10.0
         while self.amcl_update_count <= updates_before and time.time() < deadline:
             self.get_logger().warn('Waiting for AMCL pose...')
@@ -305,7 +325,7 @@ class LocalizationServer(Node):
             return False
 
     def _find_free_direction(self, min_dist: float):
-        ''' Find the direction with the most free space '''
+        # Find the direction with the most free space 
         if self.latest_scan is None:
             self.get_logger().warn('No scan data available.')
             return None
@@ -420,7 +440,6 @@ class LocalizationServer(Node):
         self._stop()
 
     def _stop(self):
-        """Mirrors InitialPositionNode.stop()."""
         vel_msg = Twist()
         vel_msg.angular.z = 0.0
         vel_msg.linear.x = 0.0

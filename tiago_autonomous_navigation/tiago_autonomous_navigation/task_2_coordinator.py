@@ -4,8 +4,8 @@ task_2_coordinator.py
 State-machine coordinator for Task 2: autonomous discovery of two ArUco
 markers (Pick ID=26, Place ID=238) while navigating a known map.
 
-State machine
-─────────────
+State machine:
+
   EXPLORE            Navigate through map waypoints; ArUco callbacks watch
                      concurrently for markers. A detection interrupts nav.
 
@@ -30,10 +30,10 @@ import rclpy.time
 from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration as DurationMsg
 from control_msgs.action import FollowJointTrajectory
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import NavigateToPose
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.action import ActionClient
 from tiago_task2_interfaces.action import Localize
 from rclpy.node import Node
@@ -66,7 +66,6 @@ WAYPOINT_GRID_M = 0.25
 # Minimum distance between kept waypoints (m), postprocessing.
 WAYPOINT_MIN_DIST_M = 2.0
 
-
 class Task2Coordinator(Node):
     """
     Task 2 state machine
@@ -80,6 +79,7 @@ class Task2Coordinator(Node):
 
         # Nav2 action client and variables
         self.nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+        self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
         self.goal_handle   = None
         self.result_future = None
@@ -107,6 +107,9 @@ class Task2Coordinator(Node):
             PoseWithCovarianceStamped, '/amcl_pose',
             self.amcl_callback, latched_qos
         )
+        self.create_subscription(
+            Odometry, '/mobile_base_controller/odom', self.odom_callback, 10
+        )
 
         # ArUco detection subscribers 
         # aruco_ros "single" publishes ~/pose (private topic), so with
@@ -122,7 +125,7 @@ class Task2Coordinator(Node):
         self.pose_svc = self.create_client(GetMarkerPose, 'get_marker_pose')
 
         # State machine
-        self.state = STATE_EXPLORE
+        self.state = STATE_INIT_LOCALIZATION
 
         # marker_id -> PoseStamped in map frame
         self.found_markers = {}
@@ -132,12 +135,13 @@ class Task2Coordinator(Node):
         self.detected_marker_pose = None   # camera frame
 
         # Prevents overwriting detected_marker_id before the state machine handles it
-        self.detection_active = True
+        self.detection_active = False
 
         # Map data 
         self.map_data  = None   
         self.map_info  = None   
         self.robot_pose = None  # from AMCL
+        self.robot_is_stopped = False
 
         self.get_logger().info('Task2Coordinator initialised.')
 
@@ -153,19 +157,27 @@ class Task2Coordinator(Node):
     def amcl_callback(self, msg: PoseWithCovarianceStamped):
         self.robot_pose = msg.pose.pose
 
+    def odom_callback(self, msg: Odometry):
+        velocity = msg.twist.twist
+        self.robot_is_stopped = (
+            abs(velocity.linear.x) < 0.01
+            and abs(velocity.linear.y) < 0.01
+            and abs(velocity.angular.z) < 0.01
+        )
+
     def _aruco26_callback(self, msg: PoseStamped):
-        """Fires when aruco marker ID 26 is detected."""
+        # Fires when aruco marker ID 26 is detected.
         if self.detection_active and PICK_MARKER_ID not in self.found_markers:
-            self.detection_active     = False   # debounce until processed
-            self.detected_marker_id   = PICK_MARKER_ID
+            self.detection_active = False   # debounce until processed
+            self.detected_marker_id = PICK_MARKER_ID
             self.detected_marker_pose = msg
             self.get_logger().info(f'ArUco marker {PICK_MARKER_ID} detected!')
 
     def _aruco238_callback(self, msg: PoseStamped):
-        """Fires when aruco marker ID 238 is detected."""
+        # Fires when aruco marker ID 238 is detected.
         if self.detection_active and PLACE_MARKER_ID not in self.found_markers:
-            self.detection_active     = False
-            self.detected_marker_id   = PLACE_MARKER_ID
+            self.detection_active = False
+            self.detected_marker_id = PLACE_MARKER_ID
             self.detected_marker_pose = msg
             self.get_logger().info(f'ArUco marker {PLACE_MARKER_ID} detected!')
 
@@ -294,6 +306,65 @@ class Task2Coordinator(Node):
     def _feedbackCallback(self, msg):
         self.feedback = msg.feedback
 
+    def spin_360(self):
+        """Turn once in place using a constant angular velocity."""
+        self.lower_head(tilt=-0.7)
+        speed = 0.5
+        duration = 2.0 * np.pi / speed
+        start_time = time.time()
+
+        cmd = Twist()
+        cmd.angular.z = speed
+
+        self.get_logger().info('Spinning 360 degrees...')
+        while rclpy.ok():
+            if time.time() - start_time >= duration:
+                break
+            self.cmd_vel_pub.publish(cmd)
+            rclpy.spin_once(self, timeout_sec=0.1)
+            if self.detected_marker_id is not None:
+                self.cmd_vel_pub.publish(Twist())
+                self.get_logger().info('ArUco detected during spin.')
+                return True
+
+        self.cmd_vel_pub.publish(Twist())
+        self.get_logger().info('Spin complete.')
+        self.lower_head(tilt=-0.4)
+        return False
+
+
+    def _wait_for_new_marker_pose(self, marker_id: int):
+        """Wait until the robot has stopped, then return a new marker pose."""
+        self.detection_active = False
+        self.detected_marker_id = None
+        self.detected_marker_pose = None
+
+        self.get_logger().info('Waiting for the robot to stop...')
+        while rclpy.ok() and not self.robot_is_stopped:
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        self.get_logger().info(
+            f'Robot stopped. Waiting for a new detection of marker {marker_id}...'
+        )
+        self.detection_active = True
+
+        while rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+            if self.detected_marker_id == marker_id:
+                pose = self.detected_marker_pose
+                self.detected_marker_id = None
+                self.detected_marker_pose = None
+                return pose
+
+            # Ignore another marker while waiting for this one.
+            if self.detected_marker_id is not None:
+                self.detected_marker_id = None
+                self.detected_marker_pose = None
+                self.detection_active = True
+
+        return None
+
 
     # ----------- Service call helpers -------------------
 
@@ -313,6 +384,40 @@ class Task2Coordinator(Node):
         req = GetMarkerPose.Request()
         req.marker_id = marker_id
         req.pose_in_camera_frame = pose_camera
+
+        future = self.pose_svc.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=8.0)
+
+        if not future.done() or future.result() is None:
+            self.get_logger().error(
+                f'Service call for marker {marker_id} timed out.'
+            )
+            return None
+
+        result = future.result()
+        if not result.success:
+            self.get_logger().error(
+                f'Service returned failure for marker {marker_id}: {result.message}'
+            )
+            return None
+
+        return result.pose_in_map_frame
+
+    def _get_aruco_pose(
+        self, marker_id: int
+    ):
+        """
+        Call the get_marker_pose service to transform pose_camera -> map frame.
+        Returns the map-frame PoseStamped, or None on failure.
+        """
+        if not self.pose_svc.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error(
+                '"_get_aruco_pose" service not available within 5 s!'
+            )
+            return None
+
+        req = GetMarkerPose.Request()
+        req.marker_id = marker_id
 
         future = self.pose_svc.call_async(req)
         rclpy.spin_until_future_complete(self, future, timeout_sec=8.0)
@@ -367,6 +472,7 @@ class Task2Coordinator(Node):
         else:
             self.get_logger().error('Localization action returned success=False.')
             return False
+
 
     def _localize_feedback_callback(self, feedback_msg):
         cov = feedback_msg.feedback.current_covariance
@@ -521,7 +627,11 @@ class Task2Coordinator(Node):
                     return
 
                 self.get_logger().info('Localization complete. Starting exploration.')
+                # Ignore any ArUco detection received during localization.
+                self.detected_marker_id = None
+                self.detected_marker_pose = None
                 self.state = STATE_EXPLORE
+                self.detection_active = True
 
             elif self.state == STATE_EXPLORE:
                 
@@ -544,6 +654,11 @@ class Task2Coordinator(Node):
                     self.state = STATE_PROCESS_TARGET
                     # we will finish the scan of the area later
                 else:
+                    if self.status == GoalStatus.STATUS_SUCCEEDED:
+                        if self.spin_360():
+                            wp_i += 1
+                            self.state = STATE_PROCESS_TARGET
+                            continue
                     wp_i += 1
                     # Re-enable detection for the next navigation leg
                     self.detection_active = True
@@ -551,19 +666,21 @@ class Task2Coordinator(Node):
             
             elif self.state == STATE_PROCESS_TARGET:
 
+                # The first detection only tells us which marker was seen.
+                marker_id = self.detected_marker_id
+
                 # Stop the robot if it is still moving
                 if not self.is_nav_complete():
                     self._cancel_nav()
 
-                # Consume the detection event
-                marker_id    = self.detected_marker_id
-                marker_pose  = self.detected_marker_pose
-                self.detected_marker_id   = None
-                self.detected_marker_pose = None
-
-                self.get_logger().info(f'Processing detected marker {marker_id} ...')
-
-                map_pose = self._get_map_pose(marker_id, marker_pose)
+                # Discard the first pose and get a new one while stationary.
+                marker_pose = self._wait_for_new_marker_pose(marker_id)
+                map_pose = None
+                if marker_pose is not None:
+                    self.get_logger().info(
+                        f'Processing new detection of marker {marker_id}...'
+                    )
+                    map_pose = self._get_map_pose(marker_id, marker_pose)
 
                 if map_pose is not None:
                     self.found_markers[marker_id] = map_pose
